@@ -1,0 +1,128 @@
+# This config file is used by ros2_control
+controller_manager:
+  ros__parameters:
+    update_rate: 500  # Hz
+
+    left_arm_group_controller:
+      type: joint_trajectory_controller/JointTrajectoryController
+
+
+    right_arm_group_controller:
+      type: joint_trajectory_controller/JointTrajectoryController
+
+
+    head_group_controller:
+      type: joint_trajectory_controller/JointTrajectoryController
+
+
+    body_group_controller:
+      type: joint_trajectory_controller/JointTrajectoryController
+
+
+    left_hand_controller:
+      type: joint_trajectory_controller/JointTrajectoryController
+
+
+    right_hand_controller:
+      type: joint_trajectory_controller/JointTrajectoryController
+
+
+    joint_state_broadcaster:
+      type: joint_state_broadcaster/JointStateBroadcaster
+
+joint_state_broadcaster:
+  ros__parameters:
+    # 广播频率建议与硬件同步
+    publish_rate: 500
+    
+left_arm_group_controller:
+  ros__parameters:
+    joints:
+      - Joint1_l
+      - Joint2_l
+      - Joint3_l
+      - Joint4_l
+      - Joint5_l
+      - Joint6_l
+      - Joint7_l
+    command_interfaces:
+      - position
+    state_interfaces:
+      - position
+      - velocity
+    state_publish_rate: 100.0
+    action_monitor_rate: 20.0
+    allow_partial_joints_goal: false
+    
+right_arm_group_controller:
+  ros__parameters:
+    joints:
+      - Joint1_r
+      - Joint2_r
+      - Joint3_r
+      - Joint4_r
+      - Joint5_r
+      - Joint6_r
+      - Joint7_r
+    command_interfaces:
+      - position
+    state_interfaces:
+      - position
+      - velocity
+    state_publish_rate: 100.0
+    action_monitor_rate: 20.0
+    allow_partial_joints_goal: false
+    
+head_group_controller:
+  ros__parameters:
+    joints:
+      - joint_head_yaw
+      - joint_head_pitch
+    command_interfaces:
+      - position
+    state_interfaces:
+      - position
+      - velocity
+    state_publish_rate: 100.0
+    action_monitor_rate: 20.0
+    allow_partial_joints_goal: false
+    
+body_group_controller:
+  ros__parameters:
+    joints:
+      - joint_lift_body
+      - joint_body_pitch
+    command_interfaces:
+      - position
+    state_interfaces:
+      - position
+      - velocity
+    state_publish_rate: 100.0
+    action_monitor_rate: 20.0
+    allow_partial_joints_goal: false
+    
+left_hand_controller:
+  ros__parameters:
+    joints:
+      - left_narrow2_joint
+    command_interfaces:
+      - position
+    state_interfaces:
+      - position
+      - velocity
+    state_publish_rate: 100.0
+    action_monitor_rate: 20.0
+    allow_partial_joints_goal: false
+    
+right_hand_controller:
+  ros__parameters:
+    joints:
+      - right_narrow2_joint
+    command_interfaces:
+      - position
+    state_interfaces:
+      - position
+      - velocity
+    state_publish_rate: 100.0
+    action_monitor_rate: 20.0
+    allow_partial_joints_goal: false

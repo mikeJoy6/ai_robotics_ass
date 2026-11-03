@@ -1,0 +1,9 @@
+<library path="arm_control_ros">
+  <class name="genie_hardware/GenieArmHardware"
+         type="genie_hardware::GenieArmHardware"
+         base_class_type="hardware_interface::SystemInterface">
+    <description>
+      Genie Robot Arm Hardware Interface.
+    </description>
+  </class>
+</library>

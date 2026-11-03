@@ -1,0 +1,32 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>genie_robot_agibot_g1_hardware</name>
+  <version>0.0.0</version>
+  <description>
+    智元 A2D G1 机器人 bundle —— 控制 L0 硬件接口层（硬件门实现）。
+    ros2_control SystemInterface 插件 arm_control_ros，是 MoveIt ↔ 真机的唯一桥梁。
+    本包是 bundle 目录 genie_robot_agibot_g1/ 下的硬件子包；同目录还有
+    genie_description / genie_moveit_config / genie_msgs。见工作空间根 README.md §2 / §3「控制 L0」。
+  </description>
+  <maintainer email="austin@todo.todo">austin</maintainer>
+  <license>Apache-2.0</license>
+
+  <buildtool_depend>ament_cmake</buildtool_depend>
+
+  <!-- arm_control_ros.cpp 实际用到的依赖（不含原单体 arm_control 的 moveit/tf2/json） -->
+  <depend>rclcpp</depend>
+  <depend>std_msgs</depend>
+  <depend>sensor_msgs</depend>
+  <depend>genie_msgs</depend>          <!-- 机器人专属 SDK 驱动消息：ArmState/ArmControl/HeadState/WaistState -->
+  <depend>hardware_interface</depend>
+  <depend>pluginlib</depend>
+  <depend>rclcpp_lifecycle</depend>
+
+  <export>
+    <build_type>ament_cmake</build_type>
+    <!-- 向 ros2_control 注册硬件插件；插件类名 genie_hardware/GenieArmHardware 与
+         genie_moveit_config/config/A2D.ros2_control.xacro 中的 <plugin> 字符串匹配（与包名无关） -->
+    <ros2_control plugin="${prefix}/genie_hardware.xml" />
+  </export>
+</package>

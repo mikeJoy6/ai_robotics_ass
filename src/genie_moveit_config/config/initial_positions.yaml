@@ -1,0 +1,23 @@
+# Default initial positions for A2D's ros2_control fake system
+
+initial_positions:
+  Joint1_l: 0
+  Joint1_r: 0
+  Joint2_l: 0
+  Joint2_r: 0
+  Joint3_l: 0
+  Joint3_r: 0
+  Joint4_l: 0
+  Joint4_r: 0
+  Joint5_l: 0
+  Joint5_r: 0
+  Joint6_l: 0
+  Joint6_r: 0
+  Joint7_l: 0
+  Joint7_r: 0
+  joint_body_pitch: 0
+  joint_head_pitch: 0
+  joint_head_yaw: 0
+  joint_lift_body: 0
+  left_narrow2_joint: 0
+  right_narrow2_joint: 0

@@ -1,0 +1,18 @@
+<?xml version="1.0"?>
+<robot xmlns:xacro="http://www.ros.org/wiki/xacro" name="A2D">
+    <xacro:arg name="initial_positions_file" default="initial_positions.yaml" />
+    <!-- 头部开关：true(默认)=MoveIt/ros2_control 照常控头；false=硬件层不再往 /wbc/head_command 发头命令
+         (仍读头部状态)，把脖子让给外部 PID 伺服(follow)。新 launch 传 control_head:=false 启用。 -->
+    <xacro:arg name="control_head" default="true" />
+
+    <!-- Import A2D urdf file -->
+    <xacro:include filename="$(find genie_description)/a2d_urdf/A2D.urdf" />
+
+    <!-- Import control_xacro -->
+    <xacro:include filename="A2D.ros2_control.xacro" />
+
+
+    <xacro:A2D_ros2_control name="GenieHardware" initial_positions_file="$(arg initial_positions_file)"/>
+
+</robot>
+

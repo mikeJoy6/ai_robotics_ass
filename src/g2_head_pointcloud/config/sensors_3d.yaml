@@ -1,0 +1,60 @@
+# MoveIt 3D 感知：头部深度点云 → octomap，规划组(手臂/腰/头)规划时避开。
+#   点云由 genie_robot_agibot_g2_perception/head_depth_cloud 发布（hardware.launch.py 默认拉起）。
+#   需要 apt 包 ros-humble-moveit-ros-perception（提供 PointCloudOctomapUpdater 插件）。
+#
+# octomap 行为（MoveIt 自带，正好是要的语义）：
+#   看到点 → 该格占据；相机到点之间的射线经过的格 → 清空（看到是空的就删）；
+#   被挡住/视野外的格 → 不动（遮挡不删）。
+#   点落在机器人自身碰撞模型(+padding)里 → 不记为障碍（手臂/身体不会被记录）。padding 为什么是 0.10 见 head_depth。
+# 地图存在 base_link：弯腰/转头时用当时的 TF 把点放回 base_link，地图不跟着相机动。
+#   注意：底盘移动时 base_link 跟着走，地图会整体跟着车动——只适合原地操作；要边走边建图得换 odom 系。
+
+octomap_frame: base_link
+octomap_resolution: 0.03        # m，3cm 体素（地面拟合实测标定误差约 6cm 以内）
+max_range: 2.5                  # m，更远的点只用来清空射线
+
+sensors:
+  - head_depth
+  - head_shadow
+  - head_sweep
+
+head_depth:
+  sensor_plugin: occupancy_map_monitor/PointCloudOctomapUpdater
+  point_cloud_topic: /head_camera/depth_points
+  max_range: 2.5
+  point_subsample: 1            # 降采样已在 head_depth_cloud 做(stride 4)
+  # m，机器人自身过滤：碰撞模型外扩后里面的点都当成自己。
+  #   MoveIt(geometric_shapes ConvexMesh)的外扩是"顶点沿 网格中心→顶点 方向推 padding"，细长 link 的侧面只外扩约一半：
+  #   0.05 时手臂 link2~5 侧面只有 2.6~2.8cm，而真机手臂表面实测比模型偏 3~4cm(标定误差) → 手臂静止也漏进 octomap，
+  #   再被背面补全往后延 25cm、被手臂自己挡着清不掉，手臂周围一圈绿格子（2026-11-02 实测 490 个漏网点）。
+  #   0.10：各面至少外扩 5.2cm、link 两头最多 10cm，接住 479/490。只影响自身过滤，不影响碰撞检查。
+  padding_offset: 0.10
+  padding_scale: 1.0
+  max_update_rate: 5.0
+  filtered_cloud_topic: /head_camera/filtered_points   # 过滤掉机器人后的点，RViz 里看自身过滤效果
+
+# 背面补全（genie_robot_agibot_g2_perception/shadow_cloud）：表面点 + 沿相机射线往后 25cm 的点，记成占据。
+#   输入是上面 head_depth 的 filtered_cloud_topic（机器人已滤掉），手臂上的点不会被往后延长。
+#   filtered_cloud_topic 不能省：MoveIt Humble 的 PointCloudOctomapUpdater::setParams 把它当必填，缺了整个传感器
+#   加载失败（只打一行 "Failed to configure updater of type PointCloudUpdater"），补全点从没进过 octomap（2026-11-02 发现）。
+head_shadow:
+  sensor_plugin: occupancy_map_monitor/PointCloudOctomapUpdater
+  point_cloud_topic: /head_camera/shadow_points
+  max_range: 2.5
+  point_subsample: 1
+  padding_offset: 0.10          # 同 head_depth
+  padding_scale: 1.0
+  max_update_rate: 5.0
+  filtered_cloud_topic: /head_camera/shadow_filtered_points
+
+# 清零星格（genie_robot_agibot_g2_perception/octomap_sweeper）：只有超出 max_range 的远点 → 只沿射线清空、不记占据。
+#   octomap 里小于 4 格的连通块，沿"相机→该格"射线清掉；射线路上有大块占据格的不发。
+head_sweep:
+  sensor_plugin: occupancy_map_monitor/PointCloudOctomapUpdater
+  point_cloud_topic: /head_camera/sweep_points
+  max_range: 2.5
+  point_subsample: 1
+  padding_offset: 0.10
+  padding_scale: 1.0
+  max_update_rate: 5.0
+  filtered_cloud_topic: /head_camera/sweep_filtered_points   # 必填（见 head_shadow）

@@ -1,0 +1,37 @@
+# OMPL 规划配置。原来没有这份文件 → MoveItConfigsBuilder 用默认模板，默认模板下
+#   逐轴朝向约束(OrientationConstraint)靠【拒绝采样】满足：随机撒配置、不合容差就扔。
+#   我们的斜抓约束把 X/Z 两轴锁到 ±5.7°，合法朝向是极薄流形，随机几乎撒不中 → 规划超时。
+#
+# 本文件的作用：给两条手臂组打开【约束状态空间 enforce_constrained_state_space】——
+#   OMPL 改用投影法直接【在流形上采样】，而不是撒了再扔，才是逐轴朝向约束的正确规划器。
+#   projection_evaluator：给规划器一个低维投影(取肩部两关节)来组织探索，约束规划必须要有。
+#
+# 注意：
+#   · 本文件会【整份替换】moveit 默认模板，所以下面的全局块(planning_plugin / request_adapters)
+#     必须原样保留，否则 OMPL 插件加载不了。request_adapters 里的 FixStartStatePathConstraints
+#     很关键：起点(ready 姿态)朝向不在约束流形上时，靠它先把起点挪到流形上再规划。
+#   · 故意【不写 planner_configs】：MoveItConfigsBuilder 检测到缺它，会自动并入 ompl_defaults.yaml
+#     的全套 planner_configs(RRTConnect 等)。
+#   · enforce_constrained_state_space 只在请求带位姿/朝向类【路径约束】时才生效；普通 moveArmToPose
+#     (无朝向路径约束)不受影响。
+
+planning_plugin: ompl_interface/OMPLPlanner
+start_state_max_bounds_error: 0.1
+jiggle_fraction: 0.05
+request_adapters: >-
+    default_planner_request_adapters/AddTimeOptimalParameterization
+    default_planner_request_adapters/ResolveConstraintFrames
+    default_planner_request_adapters/FixWorkspaceBounds
+    default_planner_request_adapters/FixStartStateBounds
+    default_planner_request_adapters/FixStartStateCollision
+    default_planner_request_adapters/FixStartStatePathConstraints
+
+left_arm_group:
+  enforce_constrained_state_space: true
+  projection_evaluator: joints(Joint1_l,Joint2_l)
+  default_planner_config: RRTConnect
+
+right_arm_group:
+  enforce_constrained_state_space: true
+  projection_evaluator: joints(Joint1_r,Joint2_r)
+  default_planner_config: RRTConnect

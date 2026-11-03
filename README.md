@@ -32,13 +32,19 @@ ai_assistant/
     │   ├── README.md                            本包文件结构与交叉引用
     │   ├── config/                              A2D.urdf.xacro / A2D.ros2_control.xacro / A2D.srdf / *.yaml
     │   └── launch/                              Setup Assistant 生成的 launch（demo、move_group、rviz ...）
-    └── genie_robot_agibot_g1_hardware/          G1 真机 ros2_control 硬件插件
-        ├── genie_hardware.xml                   插件注册：类名 genie_hardware/GenieArmHardware
-        ├── src/arm_control_ros.cpp              插件实现（读 HAL/WBC 话题，平滑下发关节命令）
-        ├── launch/hardware.launch.py            真机启动：ros2_control + 控制器 spawner + move_group + rviz
-        ├── launch/hardware_head_off.launch.py   同上，但 control_head:=false（头部交给外部控制）
-        └── scripts/force_monitor.py             六维力传感器终端监视工具（诊断用）
+    ├── genie_robot_agibot_g1_hardware/          G1 真机 ros2_control 硬件插件
+    │   ├── genie_hardware.xml                   插件注册：类名 genie_hardware/GenieArmHardware
+    │   ├── src/arm_control_ros.cpp              插件实现（读 HAL/WBC 话题，平滑下发关节命令）
+    │   ├── launch/hardware.launch.py            真机启动：ros2_control + 控制器 spawner + move_group + rviz
+    │   ├── launch/hardware_head_off.launch.py   同上，但 control_head:=false（头部交给外部控制）
+    │   └── scripts/force_monitor.py             六维力传感器终端监视工具（诊断用）
+    │
+    ├── g2_arm_ik/                               7 自由度臂 IK 与积分笛卡尔：4 种 IK 对比，最优 = g2_seeded_lm（ArmSolver.ik + polish）
+    ├── g2_detour_planning/                      末端空间绕障规划(替代 OMPL，默认 via_then_rrt) + 沿路径变速执行 + 离线 bench + 虚拟障碍/附着物工具
+    └── g2_head_pointcloud/                      头部深度图 → MoveIt octomap，15 道垃圾点过滤 + 背面补全 + 零星格清扫
 ```
+
+`g2_*` 三个目录是 G2 项目（`~/agi@g2_robot`）的精选资产：原样复制、未改 import，没有 `package.xml`，colcon 不构建；每个目录都有自己的 README。
 
 ## 任务路由
 
@@ -49,6 +55,9 @@ ai_assistant/
 | 写一个新的 ros2_control 硬件插件 | `src/genie_robot_agibot_g1_hardware/src/arm_control_ros.cpp`、`genie_hardware.xml`、`package.xml` 的 `<export>` | 同目录 |
 | 写或修改含数学公式的 `.md` | `reference/MARKDOWN_MATH_GUIDE.md`（英文：`_EN.md`），完成后运行 `reference/check_md_math.py` | `reference/CapturePointSteppingDesign.md` |
 | 平衡 / 步态控制的推导 | `reference/CapturePointSteppingDesign.md` | —— |
+| 手臂 IK / 末端直线运动（选哪个算法） | `src/g2_arm_ik/README.md` | `src/g2_arm_ik/algorithms.py` |
+| 手臂绕障规划（不用 OMPL）、轨迹时间参数化 | `src/g2_detour_planning/README.md` | `src/g2_detour_planning/planners/`、`arm_motion.py` |
+| 深度相机建 MoveIt 避障地图、删垃圾点云 | `src/g2_head_pointcloud/README.md` | `src/g2_head_pointcloud/head_depth_cloud.py` 文件头 15 条 |
 | 查看六维力数据 | `src/genie_robot_agibot_g1_hardware/scripts/force_monitor.py` 文件头注释 | —— |
 
 ## 关键事实（跨文件约束，改动前必须知道）

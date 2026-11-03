@@ -1,0 +1,25 @@
+moveit_setup_assistant_config:
+  urdf:
+    package: genie_description
+    relative_path: a2d_urdf/A2D.urdf
+  srdf:
+    relative_path: config/A2D.srdf
+  package_settings:
+    author_name: austin
+    author_email: 1553998352@qq.com
+    generated_timestamp: 1779271367
+  control_xacro:
+    command:
+      - position
+    state:
+      - position
+      - velocity
+  modified_urdf:
+    xacros:
+      - control_xacro
+  control_xacro:
+    command:
+      - position
+    state:
+      - position
+      - velocity
