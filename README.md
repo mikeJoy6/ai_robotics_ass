@@ -41,10 +41,15 @@ ai_assistant/
     │
     ├── g2_arm_ik/                               7 自由度臂 IK 与积分笛卡尔：4 种 IK 对比，最优 = g2_seeded_lm（ArmSolver.ik + polish）
     ├── g2_detour_planning/                      末端空间绕障规划(替代 OMPL，默认 via_then_rrt) + 沿路径变速执行 + 离线 bench + 虚拟障碍/附着物工具
-    └── g2_head_pointcloud/                      头部深度图 → MoveIt octomap，15 道垃圾点过滤 + 背面补全 + 零星格清扫
+    ├── g2_head_pointcloud/                      头部深度图 → MoveIt octomap，15 道垃圾点过滤 + 背面补全 + 零星格清扫
+    ├── g2_whole_body/                           腰/头/双臂关节组运动：碰撞检查 + 经录好位姿中转 / 关节 RRT + 4 个 JTC
+    ├── g2_object_perception/                    头部 RGBD 找物体：HSV 颜色 / SAM 3 文字分割 → base_link 坐标；HeadAim 转头对准；实时分割画面
+    └── g2_llm_harness/                          大模型工具调用指挥 G2：Agent 循环 + Gateway 安全关卡 + 工具 schema + 真机/假机器人后端
+        └── TOOLS_MAP.md                         ★ 能力地图：每种能力的候选工具、现在最好的、还缺什么
 ```
 
-`g2_*` 三个目录是 G2 项目（`~/agi@g2_robot`）的精选资产：原样复制、未改 import，没有 `package.xml`，colcon 不构建；每个目录都有自己的 README。
+`g2_*` 目录是 G2 项目的精选资产：原样复制、未改 import，没有 `package.xml`，colcon 不构建；每个目录都有自己的 README。
+前三个来自 `~/agi@g2_robot`（2026-11-03），后三个来自 `~/robot_harness` 和 `~/sam3_service`（2026-11-12，未提交）。
 
 ## 任务路由
 
@@ -58,6 +63,11 @@ ai_assistant/
 | 手臂 IK / 末端直线运动（选哪个算法） | `src/g2_arm_ik/README.md` | `src/g2_arm_ik/algorithms.py` |
 | 手臂绕障规划（不用 OMPL）、轨迹时间参数化 | `src/g2_detour_planning/README.md` | `src/g2_detour_planning/planners/`、`arm_motion.py` |
 | 深度相机建 MoveIt 避障地图、删垃圾点云 | `src/g2_head_pointcloud/README.md` | `src/g2_head_pointcloud/head_depth_cloud.py` 文件头 15 条 |
+| 让大模型调用机器人技能（工具定义、安全关卡、人工确认） | `src/g2_llm_harness/README.md` | `src/g2_llm_harness/gateway.py`、`loop.py`、`tools/` |
+| 决定某个能力用哪个工具、还缺什么 | `src/g2_llm_harness/TOOLS_MAP.md` | —— |
+| 按名字/颜色找物体并算 3D 坐标、转头对准物体 | `src/g2_object_perception/README.md` | `sam3_objects.py`、`color_object.py`、`head_aim.py` |
+| 跑 SAM 3（Python 3.12 服务 + ROS 3.10 客户端）、实时分割画面 | `src/g2_object_perception/README.md` | `sam3_service/server.py`、`sam3_client.py`、`scripts/sam3_live.py` |
+| 腰 / 头 / 整臂关节运动、回到录好的位姿 | `src/g2_whole_body/README.md` | `whole_body.py`、`joint_detour.py` |
 | 查看六维力数据 | `src/genie_robot_agibot_g1_hardware/scripts/force_monitor.py` 文件头注释 | —— |
 
 ## 关键事实（跨文件约束，改动前必须知道）
