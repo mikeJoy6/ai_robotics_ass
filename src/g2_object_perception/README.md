@@ -1,66 +1,34 @@
-# g2_object_perception —— 头部 RGBD 找物体:HSV 颜色 / SAM 3 文字分割,掩码 + 深度 → base_link 坐标,转头对准(AgiBot G2)
+# G2 头部视觉如何定位物体
 
-> 原样复制自 `~/robot_harness/harness/perception/`、`harness/backends/color_object.py`、`scripts/`,以及
-> `~/sam3_service/server.py`(2026-11-12,未提交)。**没改过 import**:`from .calib`、`from ..motion.kin`
-> (`kin.py` 在 `../g2_arm_ik/`)、`from harness.perception.sam3_client` 按原仓库结构写。
-> `rgbd_source.py`、`scene3d.py`、`calib.py`、`sensor_node.py` 最早来自 `~/agi@g2_robot/src/task_board_pose`(提交 `ecdfb5d`)。
+给一张桌面照片和短语 `phone`，SAM 3 可以圈出每部手机。结合与照片配对的深度和最近收到的头部位姿，就能把掩码内的像素换成 `base_link` 坐标，并按离相机的距离编号。如果任务是“找离左手最近的红色积木”，颜色分割走另一条路，选择依据是物体到指定手臂末端的距离。[按名字定位](sam3_objects.py) · [按颜色定位](color_object.py) · [两条路径的调用示例](../g2_llm_harness/backends/ros.py)
 
-## 结论:用哪个
+## 先把一帧还原到三维
 
-| 场景 | 用 | 说明 |
-|---|---|---|
-| **按名字找任意物体(首选)** | **SAM 3**:`sam3_client.Sam3Client` → `sam3_objects.objects_from_masks` | 开放词汇,一张图所有实例的掩码;要 GPU 和单独服务 |
-| 颜色鲜明、不想开 GPU | HSV:`color_object.find_objects` + `merge_frames`(5 帧中位数) | 依赖光照;新颜色用 `scripts/hsv_pick.py` 点选 |
-| 让物体在画面中央 | `head_aim.HeadAim.solve` | URDF 正运动学 + 相机外参,只改头 yaw/pitch |
-| 实时看分割效果 | `scripts/sam3_live.py` | 快输入慢处理:最新帧格子 + 零拷贝 |
-| 离线素材 | `scripts/capture_head.py` | 彩色 + 深度 + 头部位姿,格式同 `DatasetSource` |
+实时数据源按完全相同的时间戳配对彩色 JPEG 和深度图，另取最新的 `base_link → head_link3` 位姿，头部位姿与图像没有逐帧插值。离线数据源从 `frames.jsonl` 读取每帧记录的位姿及彩色、深度文件名。两者均交付 BGR 图像和毫米深度，送入三维换算前需将深度除以 1000 转为米。深度值 0 代表无回波。[数据源](rgbd_source.py) · [录帧格式](scripts/capture_head.py) · [按需订阅的节点](sensor_node.py)
 
-SAM 3 实测(RTX 4070 Laptop 8GB,bf16,640×400):一张图 1 个短语 ≈ **320 ms**,每多一个短语 +45 ms;显存常驻 3.4 GB、峰值 5.1 GB。
-积木(70~270 像素)、笔、黑包、手机都能分;`phone` 和 `mobile phone` 结果相同。
-问题:相近颜色串(红积木也匹配 `orange block` 0.66)、泛称(`box`)不稳、偶有 0.5 左右的误检。
+`Rgbd.points_base` 用深度内参反投影每个像素，再乘头部和相机的位姿，输出逐像素的三维点阵与相机原点，单位为米。此 G2 数据里的彩色与深度已逐像素对齐。代码直接采用名为 `color_in_head_link3_xyz_qxyzw` 的模组外参。旧换算重复叠加深度到彩色的平移，曾造成约 3 cm 横向偏差。[三维换算与校准依据](scene3d.py) · [640 × 400 相机标定值](calib.py)
 
-## SAM 3 为什么是单独的服务
+## 怎样从画面中选出物体
 
-SAM 3 要 Python ≥ 3.12,ROS 2 Humble 是 3.10,不能在一个进程里 import。分界线按进程画:
+| 方法 | 输入、判断与输出 | 适用范围 |
+| --- | --- | --- |
+| 文字实例分割（SAM 3） | 给一张图和若干英文短语。服务端对图像编码一次，逐个短语查询，返回每个匹配实例的掩码、框、面积及分数。客户端将 PNG 掩码解码为布尔数组。 | 适合按名称找出多个实例。相近颜色短语可能命中同一对象，笼统的名称和低分结果需结合掩码检查。[分割服务](sam3_service/server.py) · [客户端](sam3_client.py) |
+| 掩码表面定位 | 对每个实例保留有深度的像素，默认至少 15 个。取深度中位数前后 3 cm 的点，在 `base_link` 中逐轴求中位数。输出可见表面位置、到相机的距离、掩码中心相对主点的像素偏移，以及由近及远的实例编号。 | 返回代表可见表面的点。物体几何中心、朝向与被遮挡部分需要其他信息。编号仅对应本次检测。[掩码转物体](sam3_objects.py) |
+| HSV 颜色分割 | 按预设的一个或多个 HSV 区间取并集，先闭运算补高光小洞，再开运算去噪。按面积、有效深度数、估计物理尺寸筛选八邻域连通块，再取深度接近中位数的表面点，输出候选位置与大小估计。 | 适合有稳定色差的物体，可只用 CPU。光照和背景同色会影响候选。红色色相跨过 OpenCV 色相轴两端，需用两段区间。[实现](color_object.py) · [预设颜色](colors.yaml) |
+| 多帧同色选择 | 每帧选离参考点最近的候选，再对各帧的位置取中位数。调用方配置取 5 帧，至少 3 帧有效，任何一帧与中位点距离超过 2 cm 即报告不稳定。 | 参考点一般是指定手臂的末端。同色物体到手等距时可能发生候选切换，帧间离散度能揭示部分歧义。[帧间合并](color_object.py) · [阈值](../g2_llm_harness/configs/harness.yaml) |
+| 按空间范围和深度连续性分区 | `select_region` 用相机距离与车体高度限定候选，再剔除相邻像素间的深度跳变。按八邻域聚类并滤掉小区域，返回二值掩码和按面积排序的区域质心。 | 已知物体大致高度或工作距离、只需要按几何分区时可用。类别判断由调用方提供。[深度边缘与分区](scene3d.py) |
 
-- `sam3_service/server.py`(3.12,uv 建的 `.venv`):只管“图 + 英文短语 → 掩码”,不知道 ROS。
-- 其余全部(客户端、3D 换算、实时画面)跑在 ROS 的 3.10 里。
+两条定位路径都先检查有效深度像素数，再取中位深度前后 3 cm 的表面点。如果掩码横跨前后两层表面，中位深度可能恰好落在两层之间，第二次筛选就会得到空集。当前快照仍会对这个空集求中位数，此时 `xyz_m` 可能含 `NaN`。[颜色候选的坐标计算](color_object.py#L32) · [实例掩码的坐标计算](sam3_objects.py#L39)
 
-接口 `POST /segment`:JSON(`image_jpg_b64`)或 `Content-Type: image/jpeg` 原始字节 + 头 `X-Sam3-Request: {"prompts": [...]}`(实时用,不 base64)。
-安装和权重见原仓库 `~/robot_harness/docs/sam3_service.md`。
+## 已知坐标后怎样对准目标
 
-## 掩码 → 3D(`sam3_objects.objects_from_masks`)
+`HeadAim.solve` 的输入是目标的 `base_link` 坐标、当前腰头关节角和限位。先按 URDF 正运动学求相机位姿，再计算目标偏离光轴的水平角和竖直角。每轮用数值雅可比估算头部 yaw、pitch 应如何调整，腰和头部 roll 保持当前角度。每步解最小二乘问题并限制步长。输出头部目标角、剩余角度偏差及限位标志。近处桌面目标可能受低头限位约束，剩余角度直接反映目标还有多偏。[对准算法](head_aim.py) · [运动学链](../g2_arm_ik/kin.py) · [可达与限位用例](../g2_llm_harness/tests/test_sam3_look.py)
 
-掩码 ∩ 有效深度 → 取深度中位数 ±3cm 那层表面(去边缘飞点)→ `Rgbd.points_base` 的 base_link 点取中位数。
-按离相机距离排序编号。每次分割存 `traces/sam3/<时间>_<短语>/`:`color.jpg`、`overlay.jpg`、`mask_<编号>.png`、`depth.png`、`result.json`。
-离线核对:3D 点反投影回画面,和掩码中心差 < 1 像素;桌面物体 z ≈ 0.74~0.78 m。
+## 读图、复核与来源
 
-## 文件
+- 复核一次检测可从原彩色图、实例掩码、叠加图、毫米深度 PNG 和 `result.json` 入手。只有照片时，单图示例展示二维掩码与分数。有深度和头部位姿时，还可以检查三维点。[结果记录](sam3_objects.py) · [单图示例](scripts/sam3_test_image.py)
+- 调整颜色时，点选工具采样选中像素周围的 5 × 5 区域，可合并亮面与暗面样本。范围估计沿色相环找覆盖样本的短弧，低饱和样本则靠饱和度和亮度区分。[取样工具](scripts/hsv_pick.py) · [色相范围估计](../g2_llm_harness/colors.py)
+- 实时预览用最新帧覆盖上一帧，分割线程只处理当前 JPEG，避免慢推理积压旧画面。默认显示最新画面叠最新结果。开启 `--sync` 会选择产生该次掩码的原帧，更适合观察移动物体的轮廓。[实时预览](scripts/sam3_live.py)
+- 原项目让 ROS 2 Humble 客户端运行在 Python 3.10，让模型服务运行在 Python 3.12。两者以 `POST /segment` 传递原始 JPEG 和短语，也支持 JSON 包装。服务先检查本机权重缓存，缺失时交由模型加载器下载。原项目在 RTX 4070 Laptop 8 GB、bf16、640 × 400 图像上记录过约 320 ms/单短语，同图每个额外短语约增加 45 ms。[服务协议与编码复用](sam3_service/server.py) · [原评测记录摘要](../g2_llm_harness/TOOLS_MAP.md)
 
-```
-g2_object_perception/
-├── rgbd_source.py     RosSource:/gdk/camera/head_color(JPEG)+ head_depth 按 stamp 配对,/gdk/tf 取 base_link→head_link3;DatasetSource 回放
-├── scene3d.py         Rgbd.points_base:深度 → base_link 3D 点(深度和彩色已逐像素对齐,不用再配准)
-├── calib.py           头部相机内参、外参(2026-11-03 GDK 读出;能 import agibot_gdk 时重读)
-├── sensor_node.py     用时才订阅、用完退订的传感器节点(图像流量大)
-├── color_object.py    HSV 分割 + 连通域 + 尺寸过滤;merge_frames 多帧选离参考点最近 + 稳定性检查
-├── colors.yaml        预置颜色的 HSV 范围
-├── sam3_client.py     ★ Sam3Client.segment(bgr) / segment_jpeg(内存原样发);draw 画掩码
-├── sam3_objects.py    ★ objects_from_masks、save_segmentation(日志)、slug
-├── head_aim.py        ★ HeadAim:base_link→head_link3 链(5 腰 + 3 头)+ 外参,2×2 高斯-牛顿解 yaw/pitch,夹限位
-├── sam3_service/server.py  SAM 3 HTTP 服务(启动时先查本机权重缓存,完全不联网)
-└── scripts/
-    ├── sam3_live.py       实时画面 + 终端随时换物体名(4 线程:ROS 回调 / 分割 / 输入 / 显示)
-    ├── sam3_test_image.py 单张图测服务
-    ├── capture_head.py    录帧
-    └── hsv_pick.py        在画面上点选新颜色
-```
-
-## G2 专有事实 / 坑
-
-- 头部相机 640×400;深度 `16UC1` 毫米,0 = 无效;彩色是 `CompressedImage` JPEG。
-- 零位时相机在 base_link (0.20, 0.03, 1.68),光轴朝下约 25°。头 yaw 限 ±44.7°,pitch(正 = 低头)−1°~30°:桌上很近的东西低头不够。
-- `scene3d` 的外参约定:`color_in_head_link3` 直接当深度光学系用;曾多乘 `depth_in_color` 导致横向偏 3cm(文件头有记录)。
-- SAM 3 服务坑:克隆目录不能叫 `sam3/`(会挡住包);`hf` 不认 `all_proxy=socks://`;Xet 下载走代理会卡死,用 `HF_HUB_DISABLE_XET=1`;
-  `HF_HUB_OFFLINE` 对 huggingface_hub 2.4 的 `hf_hub_download` 无效,所以 server 先 `try_to_load_from_cache` 再把路径传给模型。
-- 实时程序防旧图堆积:ROS QoS `KEEP_LAST depth=1` + 程序里只留最新一帧(`LatestSlot`,`threading.Condition`);格子里只存消息引用,有人要才解码。
+本目录汇集 2026-11-12 从 `~/robot_harness` 和 `~/sam3_service` 摘录的源码，保留上游导入路径。RGBD 读取、标定和几何换算可追溯至 `~/agi@g2_robot` 的 `task_board_pose`（提交 `ecdfb5d`）。[与工具调用的连接](../g2_llm_harness/README.md) · [返回知识库](../../readme.md)

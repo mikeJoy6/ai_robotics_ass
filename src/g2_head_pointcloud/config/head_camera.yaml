@@ -4,7 +4,7 @@
 #   已 ssh 到机器人核对，与 /data/record/<录制ID>/parameters/sensor/ 下的
 #   intrinsic_head_front_depth.json / extrinsic_end_T_head_front_rgbd.json / extrinsic_head_front_rgb_T_depth.json 逐位一致
 #   （相机 SN CPBG1630003H；end = head_link3）。
-# 约定（地面拟合验证 + 文件名 A_T_B = B 在 A 里的位姿 互相印证）：XToY = X 在 Y 里的位姿；"RGBD" 指彩色相机。
+# 约定（地面拟合验证 + 文件名 A_T_B = B 在 A 里的位姿 互相印证）：XToY = X 在 Y 里的位姿；"RGBD" 指彩色相机。★2026-11-04 更正："RGBD" 实为深度相机，depth_in_color 置单位（见下）★
 #   深度点 → head_depth_optical_frame → head_color_optical_frame → head_link3
 #   用这个约定把一帧深度转到 base_link，地面倾角 0.7°（反过来用倾角 10.5°、点云翻到身后）。
 head_depth_cloud:
@@ -20,7 +20,10 @@ head_depth_cloud:
     # kHeadRGBDToHeadLink3：彩色光学系在 head_link3 里的位姿 [x y z qx qy qz qw]
     color_in_head: [0.109538, 0.0245318, 0.0793004, 0.601425, -0.591243, 0.383415, -0.376447]
     # kHeadDepthToHeadColor：深度光学系在彩色光学系里的位姿 [x y z qx qy qz qw]
-    depth_in_color: [-0.023767, -0.000476537, 3.96624e-05, -0.000163058, -0.00101275, 0.0101925, 0.999948]
+    # 2026-11-04：kHeadRGBDToHeadLink3 实测就是深度相机的位姿，深度点不该再经 depth_in_color（多挪 2.38cm，
+    #   纸板/障碍被算到真实位置左边 ~3cm，吸盘稳定偏左）。GDK 原值（要改回就换回这行）：
+    #   depth_in_color: [-0.023767, -0.000476537, 3.96624e-05, -0.000163058, -0.00101275, 0.0101925, 0.999948]
+    depth_in_color: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0]
     stride: 4                     # 每 4 个像素取 1 个：640x400 → 160x100 = 1.6 万点
     rate: 5.0                     # 发布频率上限 Hz（相机 30Hz，octomap 插入没必要那么快）
     min_depth: 0.25               # m，太近的多是噪声
@@ -44,8 +47,14 @@ head_depth_cloud:
     connect_filter: true
     connect_dist: 0.04            # m，相邻采样点 3D 距离 < connect_dist + connect_rel·深度 就算连着
     connect_rel: 0.02
+    # 块 ≥ 这么多采样点就算真实物体、不按悬空删（纸板比箱子大一圈时，从上看箱子侧面被挡，纸板顶面会被误当悬空）。0 = 关闭
+    connect_keep_points: 200
     base_frame: base_link
     ground_max_z: 0.03            # m，base_link z 低于它算贴地（实测地面 z≈-0.06）
+    # 地面不进 octomap：base_link z 低于它（地面 -0.065 + 10cm）的点不占格，挪到 clear_distance 只清空射线
+    #   （直接删的话地上已有的格子没射线清不掉）。在悬空块判断之后做（那一步要靠地面连通）。-2 = 关闭。
+    #   只管头部相机进 MoveIt 这条路；底盘雷达原始话题不动（FAST-LIO 要地面）。
+    ground_clear_z: 0.035
     # 末端球过滤：原来为"URDF 没有手、MoveIt 滤不掉手"删掉末端 15cm 球内的点。真机已拆手(2026-11-02)：
     #   手腕/法兰在 arm_r_link7 碰撞凸包里(凸包到 x=0.097，末端 link 在 0.09)，MoveIt 自身过滤(padding 0.10，各面≥5cm)已覆盖；
     #   再删 15cm 球只会把手腕正前方的真实障碍删掉。0 = 关闭；以后装了手再按手的尺寸打开。
@@ -74,6 +83,7 @@ head_depth_cloud:
 # 背面补全：输入是 MoveIt 已经滤掉机器人的 /head_camera/filtered_points，手臂上的点不会被往后延长
 shadow_cloud:
   ros__parameters:
+    ground_clear_z: 0.035         # 补出来的点 base_link z 低于它（离地 10cm 内）不要，同 head_depth_cloud
     input_topic: /head_camera/filtered_points
     output_topic: /head_camera/shadow_points
     shadow_length: 0.25           # m，往后补多长
@@ -81,13 +91,19 @@ shadow_cloud:
     shadow_reach: 1.0             # m，只补离 reach_link 这么近的点（手臂工作空间）
     reach_link: arm_base_link
 
-# 清 octomap 里已有的零星格（块 < min_voxels 格）：沿相机射线发"只清空"的远点给 sensors_3d.yaml 的 head_sweep 传感器。
+# 清 octomap 里的零星格：沿相机射线发"只清空"的远点给 sensors_3d.yaml 的 head_sweep 传感器。看不看得见都清。
 #   射线路上(外扩一圈)碰到大块占据格就跳过，不会顺带清掉真实物体。
 octomap_sweeper:
   ros__parameters:
     sensor_frame: head_depth_optical_frame
     sweep_topic: /head_camera/sweep_points
-    min_voxels: 4                 # 同 head_depth_cloud.cluster_min_voxels
+    min_voxels: 4                 # 块 < 它：不管在哪都清（同 head_depth_cloud.cluster_min_voxels）
+    # 悬空块（2026-11-13）：块 < floating_max_voxels 且整块最低格中心高于 support_z（base_link，地面 ≈ -0.06）→ 清。
+    #   原来只清 <4 格，可背面补全把每个漏网点往后延 25cm（~8 格），一个假点就是 8 格，永远清不掉。
+    #   举在空中、身体没被看到的人手（带背面补全）约 50~150 格，40 会保留它。
+    floating_max_voxels: 40
+    support_z: 0.15               # m，块的最低处在它以下 = 落地（地面上的东西、桌腿、人腿）
+    connect_reach: 2              # 两格每轴相差 ≤2 算连着（同 head_depth_cloud.cluster_reach），物体放在桌上算和桌子连着
     clip_range: 2.6               # m，必须 > sensors_3d.yaml 的 max_range(2.5)，MoveIt 才只清空不记占据
-    period: 1.0                   # s，多久查一次 octomap
-    burst_rate: 5.0               # Hz，清空射线发布频率（= head_sweep max_update_rate）
+    period: 0.5                   # s，多久查一次 octomap（原 1.0）
+    burst_rate: 10.0              # Hz，清空射线发布频率（= head_sweep max_update_rate；原 5，一个格要 ~9 次才清掉）

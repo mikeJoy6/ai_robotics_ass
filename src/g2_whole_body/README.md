@@ -1,43 +1,33 @@
-# g2_whole_body —— 腰 / 头 / 双臂关节组运动:碰撞检查 + 绕行 + 4 个 JTC(AgiBot G2)
+# G2 全身关节运动
 
-> 原样复制自 `~/robot_harness/harness/motion/`、`scripts/goto_pose.py`、`configs/poses.yaml`(2026-11-12,未提交)。
-> `whole_body.py` 最早来自 `~/agi@g2_robot/src/task_board_pose`,在 robot_harness 里拆成了 `plan()` + `run()`。**没改过 import**。
+“回到 `look` 姿势”已经给定腰、头和双臂的目标关节角。规划要决定的是这些关节怎样从当前位置走过去，以及中途会不会发生碰撞。例如两个端点都有效，肘部仍可能在直线插值的途中扫到身体。这里的参考实现按直达、录制位姿中转、关节空间搜索的顺序处理这类任务。
 
-## 结论:用哪个
+[仓库首页](../../readme.md) · [关节组定义](joints.py) · [录制位姿库](poses.yaml) · [按夹爪目标规划](../g2_detour_planning/README.md)
 
-| 场景 | 用 |
-|---|---|
-| 某一组关节转到目标角(腰、头、单臂) | `WholeBody.plan(target)` → 人确认 → `WholeBody.run(plan)` |
-| 直线插值会撞 | `JointDetour`:先经 `poses.yaml` 里录好的位姿中转,不行再关节 RRT |
-| 全身回到人录的位姿 | `scripts/goto_pose.py <名字> [--groups head]` |
+## 三种找路方法
 
-手臂**末端**的直线/绕障不在这里,见 `../g2_detour_planning/`(`via_then_rrt`)和 `../g2_arm_ik/`。
+| 方法 | 输入和做法 | 返回什么 |
+| --- | --- | --- |
+| [关节直线插值](whole_body.py#L94) | `WholeBody.plan` 读取当前关节角，接受“关节名 → 目标弧度”的映射。只指定一组里的部分关节时，其余关节的终点取当前值。沿起点到目标的关节直线分段，默认任一关节每变化至多 0.05 rad 就向 MoveIt 检查一次状态，含两端。 | 直线采样通过时只需一个运动段。最大目标偏差已小于 0.001 rad 时生成零段计划。碰撞检查失败且调用方提供绕行器时，再尝试下面两种方法。 |
+| [录制位姿中转](joint_detour.py#L51) | `JointDetour._via` 把每个录制姿势投影到传入的目标关节集合，其余未提供的角从起点补齐。按“起点到中转点再到目标”的两段关节总行程排序，依次检查两段的所有样点。 | 取第一组两段都通过的“中转点、目标点”。已有的 [find、look、zero](poses.yaml) 既可作目标，也可提供中转候选。 |
+| [关节空间 RRT-Connect](joint_detour.py#L67) | 录制中转都失败时，从起点和终点各长一棵树，交替向采样构型扩展并尝试合并。采样区间取起止角范围两侧各加 0.5 rad，再与已知 URDF 限位相交，起止差小于 0.001 rad 的关节固定。每条新边都调用同一状态检查。 | 两棵树连接后，随机挑选非相邻路点，若可直接通过就删去中间点，最多尝试 60 次。输出简化后的关节折线。在预算内未连通则返回原因。默认 15 秒从尝试中转前计时。中转枚举、单次扩展和碰撞回调可能让实际用时超过这一软预算。 |
 
-## 怎么工作
+状态检查使用差量机器人状态，将待查的关节值叠加到 MoveIt 当前规划场景，保留已有的附着物。检查范围取决于该场景实际包含的机器人模型、障碍物和占据地图。对仅给部分关节的请求，还应留意中转策略使用补齐后的组内关节，某关节终点等于起点也可能经过不同的中转角。[规划与状态检查](whole_body.py) · [中转点的取值](joint_detour.py)
 
-- 关节组 = `hardware.launch` 起的 4 个 JTC(`joints.py` 的 `GROUPS`):`body` 5 个(idx01~05)、`head` 3 个(idx11~13)、`left_arm`(idx21~27)、`right_arm`(idx61~67)。
-- `plan()`:当前角 → 目标角线性插值,每 `check_step` 弧度调一次 MoveIt `/check_state_validity`(整机,含 octomap);会撞就交给 `detour`;
-  时长按最慢关节的峰值速度算(`speed`),不少于 `min_duration`。返回 `JointPlan`(或错误字符串)。
-- `run()`:**执行前**检查机器人离规划起点 > 0.05 rad 就拒绝(规划和执行之间人可能动过它);各组 JTC 同时发,等停稳。
-- 规划和执行分开,是为了中间能让人看一眼按 `y`(harness 的 gateway 就是这么用的)。
+## 把折线变成各组共用的时间表
 
-## 关节含义(从 URDF 读出,给大模型的工具说明要写进去)
+`JointPlan` 保存起点、各段路点、分段时长和规划说明。每段用三次多项式从零速度起步、到零速度停止，段内位移最大的关节决定用时，再应用最短时长限制。默认速度上限 0.3 rad/s，每段至少 2 秒，绕行拐点也会停下来。[JointPlan 与分段轨迹](whole_body.py)
 
-| 组 | 关节 | 轴 / 正方向 |
-|---|---|---|
-| body | 1、2、3 | 绕 y 俯仰,三者之和是上身前倾;1、2 主要改高度,前倾优先改 3 |
-| body | 4 / 5 | 绕 x 侧倾 / 绕 z 转腰(正 = 向左) |
-| head | 1 | 绕 z 左右(正 = 向左,±44.7°) |
-| head | 2 | 绕 x 歪头(±8.7°) |
-| head | 3 | 绕 y 点头(正 = 低头,−1°~30°) |
+原项目中的 `run` 在发送前重新读取关节反馈。待动组内任一关节偏离规划起点超过 0.05 rad 时要求重新规划。通过后，按相同的分段时间为所选各组生成控制器轨迹。控制器返回成功后，再用实测关节角确认，最大目标误差须在 0.02 rad 以内。[执行与到位判据](whole_body.py) · [录制姿势回放的调用方式](scripts/goto_pose.py)
 
-## 文件
+## 关节名称和角度的含义
 
-```
-g2_whole_body/
-├── joints.py         GROUPS:组名 → (JTC 名, 关节名列表);parse_groups
-├── whole_body.py     ★ WholeBody:snapshot / _valid(碰撞)/ check_path / plan / run / cancel;JointPlan
-├── joint_detour.py   JointDetour:经录好位姿中转 → 关节 RRT
-├── poses.yaml        人录的全身位姿(look 等),也是 JointDetour 的中转候选
-└── scripts/goto_pose.py  全身去某个位姿,打印每个关节变化,按 y 才动
-```
+| 组 | 关节顺序 | 如何读目标值 |
+| --- | --- | --- |
+| `body` | `idx01` 至 `idx05` | 前三轴绕 Y 俯仰，合计决定前倾角，前两轴也明显改变上身高度。第 4 轴绕 X 侧倾，第 5 轴绕 Z 转腰，正值向左。 |
+| `head` | `idx11` 至 `idx13` | 依次为左右转头、侧倾、点头。转头正向向左，点头正向向下。 |
+| `left_arm`、`right_arm` | 左侧 `idx21` 至 `idx27`，右侧 `idx61` 至 `idx67` | 每臂七个角，按控制器关节顺序排列。要从夹爪的空间位姿反求这七个角，可查[手臂逆运动学](../g2_arm_ik/README.md)。 |
+
+组名、控制器和完整关节名以[关节组映射](joints.py)为准。上层工具按同一套关节语义描述转头、点头和转腰。[运动工具的关节说明](../g2_llm_harness/tools/motion.py)
+
+这份资产摘自 2026-11-12 的 `robot_harness`，保留原项目的导入和路径。回放脚本按上游布局从 `configs/poses.yaml` 读数据，本仓库的副本放在[本目录的 poses.yaml](poses.yaml)。

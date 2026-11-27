@@ -1,59 +1,36 @@
-# g2_arm_ik —— 7 自由度手臂 IK 与积分笛卡尔（AgiBot G2）
+# G2 手臂逆运动学
 
-> 原样复制自 `~/agi@g2_robot/src/genie_robot_agibot_g2_motion/genie_robot_agibot_g2_motion/`（2026-11-03），**没改过 import**：
-> 文件里的 `from .kin`、`from ...algorithms` 等按原包结构写，单独放在这里跑不起来。要用就整体放回一个 Python 包
-> （包名随意），目录结构保持本文件夹的样子即可。无 `package.xml`，colcon 不会构建本目录。
+同一个夹爪位姿，七轴手臂往往能以好几种肘部姿势到达。只给出目标的**终点逆解**时，关节怎样走到那里仍是一个独立问题。如果希望夹爪从当前位置沿直线推进，就要逐步求解，并保留沿途的关节角。本目录收录这两类解法，以及比较它们的代码。
 
-## 结论：用哪个
+[仓库首页](../../readme.md) · [IK 对比框架](ik_lab/README.md) · [算法索引](ik_lab/algorithms/README.md) · [手臂绕障规划](../g2_detour_planning/README.md)
 
-| 场景 | 用 | 位置 |
-|---|---|---|
-| **解终点 IK（首选）** | **I1′ = `ArmSolver.ik` + `polish`**（`ik_lab` 里注册名 `g2_seeded_lm`） | `algorithms.py` |
-| 末端走直线、构型连续不抡大圈 | C1 积分笛卡尔 `ArmSolver.solve` + `limit_step` + `path_sane` | `algorithms.py` |
-| 键盘点动（每按一次走一小步） | C2 `solve_pose` | `ik_lab/kinematics.py`、`differential_ik.py` |
+## 从任务选算法
 
-四个 IK 同场对比（离线 G2 右臂，30 个随机远目标，1s 预算）：
+| 想解决的问题 | 方法与输出 |
+| --- | --- |
+| 给定目标位置和完整朝向，找一个离当前手臂较近的构型 | [g2_seeded_lm](ik_lab/algorithms/g2_seeded_lm.py) 默认从当前构型和 60 个随机初值求逆解，把最近的几个解沿零空间往起点拉近。选中通过状态检查的终点后，用自适应 LM 精修，交给公共层检查整条关节直线。 |
+| 夹爪沿直线接近目标，途中也需要关节路点 | [积分笛卡尔 ArmSolver.solve](algorithms.py#L167) 从实测构型出发，每步用阻尼最小二乘（DLS）把末端向目标推进，再计算正运动学（FK）修正下一步。返回整条关节路径、收敛标志、末端误差和最后构型。 |
+| 夹爪微移或绕自身轴转一点 | [局部 IK solve_pose](ik_lab/kinematics.py) 从一个给定构型开始，对位置和姿态误差分量逐步限幅，返回新关节角和误差。[键盘点动调用方](differential_ik.py) 据此处理一次位移或转角。 |
+| 比较少量初值和多初值能找到多少种构型 | [ik](ik_lab/algorithms/ik_direct.py) 默认取 3 个初值，用局部 DLS 生成候选。[multi_ik](ik_lab/algorithms/multi_ik_direct.py) 从更多确定性初值求至多 5 个不同解，检查通往各解的关节直线，选总转角最小的一条。 |
+| 保留同样的选路规则，改善远目标的单次求解 | [multi_ik_adaptive](ik_lab/algorithms/multi_ik_lm.py) 以[自适应 Levenberg–Marquardt（LM）](ik_lab/algorithms/_adaptive_ik.py) 替换固定小步 DLS。按真实 FK 误差验收试探步，在收敛慢或接近限位时调整步长和阻尼。 |
+| 已有目标关节角，需要回放对照 | [joint](ik_lab/algorithms/joint_direct.py) 将起点与录制关节角组成两点路径，作为对照，用来区分求逆解和回到已知构型的耗时。 |
 
-| 算法 | 成功 | 平均 | 最长 | 关节总转角中位 |
-|---|---|---|---|---|
-| I2 `ik`（3 种子 + solve_pose） | 2/30 | 29ms | 36ms | 277°（只 2 个样本） |
-| I3 `multi_ik`（多种子 + solve_pose） | 21/30 | 198ms | 329ms | 388° |
-| I4 `multi_ik_adaptive`（多种子 + 自适应 LM） | 30/30 | 18ms | 93ms | 365° |
-| **I1′ `g2_seeded_lm`** | **30/30** | **18ms** | **26ms** | **341°** |
+## 读懂输入和检查条件
 
-I1′ 最优：成功率并列第一、最长耗时最稳（26ms vs 93ms）、关节转得最少（零空间拉近的效果）。
-mock 往返实测执行也最短（I1′ 4.94/5.03s vs I4 5.79/5.67s）。另测：固定起点 → 20 个随机可达位姿，左右各 20/20，平均 17ms。
+运动学以 `arm_base_link` 为手臂链根，以 `arm_l_end_link` 或 `arm_r_end_link` 为工具末端（TCP）。若目标来自 `base_link`，须先用五个腰关节的当前角度换算到手臂链根。底层 `ArmSolver` 的 `full` 模式约束位置和完整朝向，`axis` 约束位置和末端 X 轴方向，`pos` 仅约束位置。对比框架接收完整位姿。[KDL 链与 FK](kin.py) · [坐标换算调用方](../g2_detour_planning/arm_motion.py) · [对比框架请求](ik_lab/algorithms/_types.py)
 
-## 算法原理
+- **沿路径跟踪。** 积分每步把位置和旋转误差向量的长度分别限到 1 cm、0.03 rad。`limit_step` 遇到将越界的关节会尝试锁住它，让其余关节补偿。位置误差小于 3 mm 且姿态误差小于 0.02 rad 时结束。`path_sane` 再检查单步关节变化（最多 0.1 rad）、整条路径累计转角，以及调用方提供参考终点时的分支一致性。总转角上限按等效末端距离的 30 倍计算，距离下限取 0.01 m。完整位姿调用方还把姿态变化按 0.2 m/rad 折算进距离，并另行采样检查碰撞。[积分与路径检查](algorithms.py) · [路径调用方](../g2_detour_planning/arm_motion.py)
+- **只求终点。** `ArmSolver.ik` 在 `full` 下对每个初值调用 KDL LMA，再复核限位和 FK。对 `axis` 或 `pos`，当前构型用积分法，随机初值用自适应 LM。最近 8 个候选交给 `pull_near`，在保持目标容差的同时尽量减小关节变化。提供 `valid` 回调时再筛终点。框架插件随后精修到 0.1 mm、0.001 rad，公共层每隔至多 2° 采样关节直线路径。[终点搜索与拉近](algorithms.py#L198) · [插件精修](ik_lab/algorithms/g2_seeded_lm.py) · [路径验收](ik_lab/planning.py)
 
-- **I1′（`ArmSolver.ik` → `polish`）**：q0 + 60 个均匀随机种子；full 姿态模式单种子用 KDL LMA（C++，快），axis/pos 模式用自适应 LM；
-  合格解按离 q0 欧氏距离排序，最近 8 个沿**零空间往 q0 拉近**（末端不动、关节靠近当前构型），给了碰撞回调就取最近且不撞的；
-  最后自适应 LM 精修 ≤30 轮，3mm → 0.1mm。
-- **自适应 LM**（`ArmSolver.lm`，源头 `ik_lab/algorithms/_adaptive_ik.py`）：误差 `[位置; 0.2·姿态]`、信赖域限步长（初始 0.25rad）、
-  按**真实 FK 误差**回退验收、实际/预测下降比自适应调阻尼和半径、限位上往外推的关节冻结、连续 6 次不降就放弃（坏种子几步就丢）。
-- **C1 积分笛卡尔**：从实测构型出发，每步末端误差限到 ≤1cm/0.03rad，DLS(λ=0.05) `dq = J⁺e`，每步重算 FK 闭环，收敛 3mm/0.02rad。
-  每步都很小 → 相邻构型连续 → 结构上不换分支。撞限位还往外推的关节锁住、其余接管。
-  `path_sane` 兜底：单步关节 ≤0.1rad、总行程 ≤30×末端直线距离(rad/m，转角按 0.2m/rad 折进距离)、终点不换分支。
-- **I3/I4**（genie 框架）：确定性种子（当前、关节中点、零空间 ±0.35/0.7/1.0、单关节 ±0.45/0.9，按 FK 离目标排序），
-  收 5 个互差 ≥3° 的解，每个解的整条关节直线每 2° 查碰撞，选 Σ行程+0.5·max 最小。I3/I4 只差单种子求解器。
+## 怎样理解对比结果
 
-算法来源链（谁抄谁）：积分笛卡尔 tiangong `differential_ik.py` → sanofi `grasp_server._solve`；
-自适应 LM genie `_adaptive_ik.py` → sanofi `grasp_server._ik`；本目录的 `algorithms.py` 是 sanofi 版拆成无 ROS 的 `ArmSolver`。
+原项目留下的一组离线记录取 G2 右臂的 30 个随机远目标，每次规划预算 1 秒。两种 LM 方法都通过了全部目标，`g2_seeded_lm` 在这组样本中的最长耗时较短。各行耗时是历史记录，不能用来估计其他目标或机器的时延。
 
-## 文件
+| 算法 | 成功数 | 平均耗时 | 最长耗时 | 成功样本关节总转角中位数 |
+| --- | ---: | ---: | ---: | ---: |
+| [ik](ik_lab/algorithms/ik_direct.py) | 2/30 | 29 ms | 36 ms | 277°（2 个样本） |
+| [multi_ik](ik_lab/algorithms/multi_ik_direct.py) | 21/30 | 198 ms | 329 ms | 388° |
+| [multi_ik_adaptive](ik_lab/algorithms/multi_ik_lm.py) | 30/30 | 18 ms | 93 ms | 365° |
+| [g2_seeded_lm](ik_lab/algorithms/g2_seeded_lm.py) | 30/30 | 18 ms | 26 ms | 341° |
 
-```
-g2_arm_ik/
-├── kin.py              URDF 字符串 → KDL 链：FK / 雅可比 / 阻尼伪逆 / KDL LMA。G2 链 arm_base_link→arm_{l,r}_end_link
-├── algorithms.py       ★ ArmSolver：C1 solve、I1 ik/lm/pull_near、polish；常量全在文件头（无 ROS，可离线单测）
-├── ik_lab/             IK 对比框架（genie 移植，@register 插件式）+ C2 solve_pose，见 ik_lab/README.md
-├── differential_ik.py  键盘笛卡尔点动（ROS 节点，发 JTC），用 C2
-├── pose_ab.py          A/B 位姿往返测 IK（ROS 节点，--algorithm 选 ik_lab 里的算法，默认 g2_seeded_lm）
-└── test_algorithms.py  离线单测（读 G2 URDF；含一项 arm_motion.cart_profile 的测试，那个文件在 ../g2_detour_planning/）
-```
-
-## G2 专有事实
-
-- 手臂链根 `arm_base_link` 相对 `base_link` 绕 X 转了 −90°；对外接口一律 base_link 系，内部用**实测腰关节** FK 换算后再解。
-- `kin.py` 静音了 urdf_parser_py 的 "Unknown attribute" 告警（G2 URDF 有 `collision name` / `collision_checking` 扩展字段）。
-- 没搬 sanofi 的 `band` 姿态模式（抓垃圾袋专用）、genie 的 `multi_ik_5d` / `link6_ik`（按 G1 关节名写死）。
+源码取自 2026-11-03 的 G2 运动包，保留了原项目的 Python 导入路径。积分求解沿用天工差分 IK 经 Sanofi 移植的实现。多种子对比框架源自 G1 的 `genie_motion`。A/B 程序展示怎样录两个位姿并用同一种算法往返，离线用例展示怎样用外部 G2 URDF 生成可达目标、通过 FK 复核关节解。[A/B 调用流程](pose_ab.py) · [离线用例](test_algorithms.py)

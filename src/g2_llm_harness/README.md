@@ -1,61 +1,30 @@
-# g2_llm_harness —— 大模型通过工具调用指挥 G2(Agent 循环 + Gateway 安全关卡)
+# G2 模型工具 · 从一句指令到一个可检查的计划
 
-> 原样复制自 `~/robot_harness/`(工作区,2026-11-12,**未提交**;最近提交 `6bd385c`),**没改过 import**:
-> `from .motion.joints`、`from ..perception.calib` 等按原包 `harness/` 的结构写。感知在 `../g2_object_perception/`,
-> 关节组运动在 `../g2_whole_body/`,手臂运控是 `../g2_detour_planning/arm_motion.py` + `../g2_arm_ik/`。
-> 要跑就用原仓库 `~/robot_harness`(`python3 scripts/run_task.py`)。完整设计文档在原仓库 `docs/`。
+[知识库首页](../../readme.md) · [G2 能力地图与实测记录](TOOLS_MAP.md) · [工具调用循环](loop.py) · [Gateway](gateway.py)
 
-## 结论:结构
+以“让右手靠近最近的手机”为例，模型先请求 `find_objects("phone")`，再把返回的 `phone_1` 和 `right` 交给 `approach_object`。手机坐标取自相机，目标高度由程序计算。工具会把规划摘要、检查结果或规划失败原因返回给模型。原工程用同一套工具定义连接 ROS 后端和内存中的假机器人，本目录保存这套设计供阅读。[物体工具定义](tools/objects.py) · [ROS 后端](backends/ros.py) · [假机器人](backends/fake.py)
 
-```text
-用户指令 → loop.run_agent ⇄ DeepSeek(OpenAI 兼容 tool calling)
-              ↓ 模型只能选工具、填参数
-           gateway.Gateway.execute   参数校验、坐标计算、限位/范围检查、只规划模式、人按 y
-              ↓
-           backends/ros.py RosBackend(真机)| backends/fake.py FakeBackend(离线测试)
-```
+## 每个工具实际计算什么
 
-三条原则:
+| 工具 | 输入如何变成结果 | 算法或数据来源 |
+| --- | --- | --- |
+| `locate_object` | 输入颜色和所选手臂。逐帧提取 HSV 色块和深度，在每帧选择离该臂末端最近的一块，再取跨帧中位位置、检查离散程度。成功后保存一个带时间与手臂标记的颜色目标。 | [色块检测与多帧合并](../g2_object_perception/color_object.py) |
+| `find_objects` | 输入英文物体名。SAM 3 在一帧中分割实例，掩码内有效深度生成三维位置，按到相机的距离编号。同一短语重查后会重建编号表中该短语的条目。本次未检出时也会清除旧编号，后端报错时则保留。 | [掩码定位与排序](../g2_object_perception/sam3_objects.py) · [编号表](gateway.py#L86) |
+| `get_left_end_pose`、`get_robot_state` | 前者只返回左臂末端在 `base_link` 的位置（米）。后者返回腰、头、两臂关节角，以及两个末端的位置、姿态和本条指令剩余的运动次数。 | [状态读取与单位转换](gateway.py#L160) |
+| `approach_object` | 从编号表或同一手臂的颜色目标取坐标，在基座 z 轴加悬停高度。检查目标时效、工作空间和行程，先规划笛卡尔直线，失败再尝试绕障。沿途还检查末端最低点与物体的高度差。结果是悬停计划，终点保持当前姿态。 | [悬停目标与高度检查](gateway.py#L199) · [直线和绕障选择](backends/ros.py#L230) |
+| `look_at_object` | 把已编号物体的位置交给头部运动学，求使相机朝向目标的 yaw、pitch，受限位时返回剩余角度误差。执行后按同一短语重检，用三维距离找回原目标，报告像素偏差。 | [头部瞄准](../g2_object_perception/head_aim.py) · [执行后的复核](gateway.py#L144) |
+| `move_arm_end` | 输入相对平移（厘米）和可选的基座轴相对转动（度）。平移加到当前位置，旋转用矩阵复合，随后检查两姿态之间的最小转角。目标交给手臂规划器，得到保持或改变末端姿态的路径。 | [姿态复合与转角](geometry.py) · [位移与转角检查](gateway.py#L267) |
+| `move_joints` | 输入一组关节的增量或绝对角，两种表示选其一。度数换成弧度后检查单关节变化量和 URDF 限位。关节插值路径发生碰撞时，尝试已有位姿中转，再尝试关节空间随机树。 | [关节工具及各轴含义](tools/motion.py) · [全身规划算法](../g2_whole_body/README.md) |
+| `go_to_pose` | 从已录位姿读取所选组的关节角，复用限位和全身碰撞检查。多组联动采用其中最慢的速度配置。有可选位姿时，模型才会看到这个工具。 | [位姿数据](../g2_whole_body/poses.yaml) · [共享关节规划](gateway.py#L363) |
 
-1. **模型给不了绝对坐标**。物体坐标由感知算、存在 gateway 里;模型只传颜色名、物体编号(`phone_1`)、相对偏移、关节增量、录好的位姿名。
-2. **安全规则写在代码里**(gateway),不写在 prompt 里。碰撞交给规划器,gateway 只挡单位写错、范围明显不对。
-3. **所有运动:规划 → 检查 → (`--plan-only` 到此为止)→ 人按 `y` → 执行**。每条指令最多 `max_moves_per_command` 次。
+## 从工具结果读出执行状态
 
-## 工具(给模型看的,`tools/objects.py` + `tools/motion.py`)
+- **模型何时停止。** 每轮调用把工具名和 JSON 参数交给 Gateway，结果连同调用编号回到模型上下文。模型给出文本或达到步数上限时结束。任务入口为每条新指令创建一个 Gateway，因此编号和运动次数都只在这一条指令内有效。[循环](loop.py) · [模型接口](llm.py) · [任务入口与 JSONL 记录](scripts/run_task.py)
+- **计划何时变成动作。** ROS 后端沿规划的关节点做正运动学，取最低末端高度。需要降低速度时，按同一比例拉长时间、缩小速度，并按比例的平方缩小加速度。`plan_only` 返回 `executed: false`。原工程的真机入口在交给后端执行前还要求操作者确认。规划器要检查桌面碰撞，桌面必须已进入占据地图或作为碰撞体加入场景，悬停工具的最低高度检查只比较末端与目标的 z 值。[路径处理](backends/ros.py#L230) · [降速](backends/ros.py#L34) · [确认与执行](gateway.py#L181)
+- **颜色阈值怎样得到。** 点选的 HSV 像素确定饱和度、明度范围。色相沿圆周找覆盖样本的短弧，加上余量后若跨过零点就拆成两段。低饱和度样本使用完整色相范围，使黑白灰能靠明度和饱和度区分。[阈值估计](colors.py) · [收录的颜色表](../g2_object_perception/colors.yaml)
 
-| 工具 | 作用 | 动不动 |
-|---|---|---|
-| `locate_object(color, arm)` | HSV 颜色定位,同色多个选离 `arm` 末端最近的 | 否 |
-| `find_objects(query)` | SAM 3 按英文物体名找,按离相机由近到远编号 `<名>_1…` | 否 |
-| `get_left_end_pose()` / `get_robot_state()` | 末端位姿 / 全部关节角 + 两臂末端 | 否 |
-| `approach_object(object_id?, arm, standoff_cm)` | 末端到物体正上方(直线 → `via_then_rrt` 绕障) | 是 |
-| `move_arm_end(arm, offset_cm, rotate_deg)` | 末端相对平移/转动 | 是 |
-| `move_joints(group, deltas_deg/angles_deg)` | 腰/头/左臂/右臂关节(`WholeBody` 碰撞检查 + 绕行) | 是 |
-| `go_to_pose(name, groups)` | 去 `poses.yaml` 里人录的位姿 | 是 |
-| `look_at_object(object_id)` | 只转头,让物体在画面中央(`HeadAim`) | 是 |
+## 快照边界
 
-## 文件
+源码取自 2026-11-12 的 `robot_harness` 工作树，保留了原工程的导入路径。颜色表、位姿表与底层算法分别收录在相邻目录。假后端用预设坐标和内存中的关节状态验证调用流程，它给出的“假规划”只说明消息如何流转。[感知资产](../g2_object_perception/README.md) · [运动资产](../g2_detour_planning/README.md) · [假后端实现](backends/fake.py)
 
-```
-g2_llm_harness/
-├── loop.py             ★ run_agent:问模型 → 执行工具 → 结果回给模型;SYSTEM 提示词
-├── llm.py              DeepSeek 接口(标准库 urllib,读环境变量里的 key)
-├── gateway.py          ★ Gateway:每个工具一个 _handler;物体编号表 self.objects;_plan_and_run_joints / _confirm_and_run
-├── geometry.py         rpy ↔ 矩阵、相对转动(纯 numpy)
-├── colors.py           颜色表 colors.yaml 读写、由采样像素算 HSV 范围
-├── tools/              给模型看的 JSON schema(工具名必须和 gateway 的 handler 名一致)
-├── backends/ros.py     真机:ArmMotion + WholeBody + 头部 RGBD + SAM 3 客户端 + HeadAim;发布 TF target_object
-├── backends/fake.py    假机器人,方法和 ros.py 一一对应(含假 SAM 3、假转头)
-├── configs/harness.yaml  模型、运动上限、工作范围、视觉、SAM 3 参数
-├── scripts/run_task.py 入口:--real 真机、--plan-only 只规划;每条指令写 traces/<时间>.jsonl
-└── tests/              87 个离线测试(假机器人;HeadAim 那 2 个要 PyKDL + G2 URDF)
-```
-
-## 踩过的坑(改之前必须知道)
-
-- **工具说明要写清关节含义**:第一版没写,模型把“腰往前弯 90°”平均分给腰的 5 个关节。现在 `tools/motion.py` 的 `GROUP_TEXT` 写了每个关节绕哪根轴、正方向。
-- **“最近的”要按要动的那条手臂算**:颜色定位曾写死按左臂选,右臂被派去够左边的物体(规划失败)。现在 `locate_object` 带 `arm`,`approach_object` 发现手臂不一致就拒绝。
-- **两种定位要打通**:`approach_object` 曾只认颜色定位的单槽位,`find_objects` 找到的 `phone_1` 用不上。现在填 `object_id` 就查编号表。
-- **`harness.yaml` 这份是放宽过的**:`max_travel_m` 1.70、`workspace` x 上限 1.85、右臂 y 上限 1.20(原来 0.70 / 0.85 / 0.20)。按这份配置,`test_workspace_refused` 等 3 个测试会失败;放宽后越界目标会一路送到规划器才被拒。
-- `use_head_cloud:=false` 启动时 MoveIt 没有 octomap,**桌子不在碰撞检查里**,绕障也绕不开它;`approach_object` 只靠“路径最低点比物体高 13cm”兜底。
-- DeepSeek key 只放 `.env`(gitignore,chmod 600),`llm.py` 从环境变量读。
+一份离线测试将左臂 x = 1.5 m 视为越界，而快照配置的上限已放宽到 1.85 m。测试仍可用来阅读失败、拒绝和只规划等返回值的约定。[参数表](configs/harness.yaml) · [物体工具用例](tests/test_objects.py#L106) · [运动用例](tests/test_motion_tools.py) · [转头复核用例](tests/test_sam3_look.py)

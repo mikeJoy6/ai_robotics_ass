@@ -1,13 +1,18 @@
-# ik_lab —— IK 对比框架（genie 移植）+ 共用运动学小件
+# 如何比较到达同一个 TCP 位姿的解法
 
-来源：`g1_pointcloud_grasping/src/genie_motion/genie_motion/`（G1 项目），搬到 G2 时只去掉了按 G1 关节名写死的 5D 打分。
-`ChainKin` 用的是上一级的 `../kin.py`，所以 ik_lab、键盘点动、arm_motion 共用同一个 URDF→KDL 模型。
+把手臂的起点和目标固定下来，各算法只负责给出候选关节路径。框架用同一份运动学模型、同一组终点容差和同一个状态检查回调验收这些路径。这样可以分辨一次失败发生在逆运动学、连接路径，还是计算超时。
 
-| 文件 | 内容 |
-|---|---|
-| `kinematics.py` | `solve_pose`（**C2**：固定小步 DLS 局部 IK，每步 ≤2mm/0.01rad，收敛 0.1mm/0.001rad，≤100 轮）、`rotation_vector` / `rotation_about` / `IkResult` |
-| `pose_task.py` | 姿态残差、姿态雅可比（精确 `Jr⁻¹·Jω`）、任务零空间（生成种子用）、关节行程权重 |
-| `planning.py` | `MotionSettings` + `make_trajectory`：两点五次多项式时间参数化（速度/加速度/加加速度限），`plan_motion` 跑算法并校验候选路径。`arm_motion.pose_to` 的点到点计时也用它 |
-| `algorithms/` | 可插拔 IK 算法，见 `algorithms/README.md` |
+[手臂 IK 总览](../README.md) · [注册算法及实现](algorithms/README.md) · [A/B 调用方](../pose_ab.py)
 
-调用方：`../pose_ab.py`（A/B 往返测 IK）、`../differential_ik.py`（键盘点动用 `solve_pose`）。
+## 从请求到带时间的轨迹
+
+1. **定义目标。** `PlanningRequest` 接收实测关节角、链根坐标系中的目标位置和旋转矩阵、运动学模型、截止时间及状态检查回调。G2 版请求使用完整姿态。录制的终点关节角仅出现在 `JointReplayRequest` 中，供回放对照使用。[请求类型与候选路径](algorithms/_types.py) · [手臂运动学链](../kin.py)
+2. **生成候选。** [ik](algorithms/ik_direct.py) 从少量初值求局部逆解。[multi_ik](algorithms/multi_ik_direct.py) 从多组初值收集不同解，再找关节总行程最短的可行直线。[multi_ik_adaptive](algorithms/multi_ik_lm.py) 对同样的初值改用自适应 LM。[g2_seeded_lm](algorithms/g2_seeded_lm.py) 扩大随机初值搜索，再拉近并精修一个终点。[joint](algorithms/joint_direct.py) 给出通向已知关节角的直线路径。每个插件都返回包含起点和终点的关节路点序列。
+3. **检验并排序。** `plan_motion` 验证路径形状、有限值、起点、限位和终点 FK（位置误差至多 0.1 mm、姿态误差至多 0.001 rad）。若有多个候选，就按总行程加半个最大单关节行程排序，然后依次对每一段做插值和状态检查，相邻样点任一关节的变化至多 2°。所有候选失败时返回错误。[公共验收与评分](planning.py)
+4. **计算每段时间。** `make_trajectory` 按关节速度、加速度和加加速度约束估算五次多项式段的最短用时，每段至少 1 秒。它写出路点位置、累计时间和零边界速度、加速度，因而中间路点也是停点。成功时得到 `PlannedMotion`，内含轨迹消息、总时长和算法标签。[轨迹时间参数化](planning.py)
+
+## 两个公用的数值方法
+
+**小步局部逆解。** `solve_pose` 每轮用 FK 算当前位姿，将位置误差每个分量限制在 ±2 mm、旋转误差每个分量限制在 ±0.01 rad，再用阻尼最小二乘得到关节增量，按关节限位裁剪。它从单个初值出发，默认最多 100 轮。返回的 `IkResult` 同时给出关节角、是否收敛、残差和迭代数，键盘点动用这些量决定是否接受本次小幅目标。[局部求解器](kinematics.py) · [点动调用方](../differential_ik.py)
+
+**姿态误差与零空间。** 完整姿态误差取目标与当前旋转之差的旋转向量。`orientation_jacobian` 描述它随关节变化的速率，`task_nullspace` 通过奇异值分解找出对当前末端任务一阶影响为零的关节方向。在七轴臂上，沿这些方向扰动可得到不同的肘部初值，最终是否到位仍由 FK 检查。[姿态与零空间](pose_task.py) · [初值生成](algorithms/_seeds.py)

@@ -1,15 +1,19 @@
-# tools —— 往运行中的 MoveIt 加虚拟障碍 / 附着物（测绕障用）
+# 在绕障场景中表达料框与纸板
 
-原在 `genie_robot_agibot_g2_hardware/scripts/` 和 `launch/`，`ros2 run genie_robot_agibot_g2_hardware <脚本>.py` 调用。
+同一条路径可能让手腕避开料框，却让纸板边缘擦到框沿。在原 G2 工程的 MoveIt 场景里，料框固定在世界坐标中，纸板附着在末端并随关节构型移动。这里收录生成这些场景的参考源码。[返回绕障规划](../README.md) · [规划器如何验证一段路](../planners/README.md)
 
-| 文件 | 用途 |
-|---|---|
-| `add_collision_mesh.py` | 把一个 STL 作为 world 碰撞体加进 planning scene（`/apply_planning_scene`），同 id 再发 = 替换（改位置不用重启）。参数 mesh/frame/xyz/rpy/scale/object_id，xyz/rpy 写成字符串 `"'[0.8,0,-0.06]'"` |
-| `attach_board.py` | 给末端挂/取纸板附着碰撞体（AttachedCollisionObject，不改 URDF）：0.59×0.405×0.02m 贴在吸盘端面，吸附点在中心下方 `--offset`；`--remove` 取下并从场景删除 |
-| `hardware_obstacle.launch.py` | include 真机 `hardware.launch.py` + 用 add_collision_mesh 放一个料框 STL（`obstacle_xyz` / `obstacle_rpy` 参数） |
+| 场景工具 | 输入 | 模型如何生成或更新 |
+| --- | --- | --- |
+| [导入 STL 世界物体](add_collision_mesh.py) | ASCII 或二进制 STL、坐标系、以米表示的平移、以弧度表示的 RPY 欧拉角、缩放和物体 ID。 | 读取三角形顶点，按比例缩放，将欧拉角转成四元数，生成网格碰撞体。通过增量场景更新写入 `world`，同一 ID 再次加入时替换旧物体。 |
+| [挂取纸板](attach_board.py) | 左右臂、纸板长宽厚、吸附偏移、ID 及移除标记。 | 生成长方体附着物，挂在所选 `end_link` 上，允许接触吸盘和同侧腕节。取下时，在同一份增量场景里解除附着并删除回到世界中的物体，随后回读附着列表。 |
+| [原工程的料框场景配置](hardware_obstacle.launch.py) | 料框网格路径及其在 `base_link` 下的位置和朝向。 | 组合原 G2 硬件启动描述与网格导入节点，默认 ID 为 `zs_liaokaung`，位置为 `[0.8, 0.0, -0.06]` m。默认 STL 取自原工作空间。 |
 
-要点：
-- 虚拟碰撞体相机看不到：MoveIt 碰撞检查会算它，但 octomap 里那片是空的；规划器粗筛要另外读 planning scene 的碰撞体（`arm_motion.obstacles_root` 已做）。
-- 附着物挂上后，MoveIt 整机碰撞把它当手臂一部分，octomap 更新也会把它从点云滤掉；但调用方的 `/check_state_validity` 必须 `is_diff=True`，否则附着物被清掉。
-- 纸板碰撞厚度 2cm 的理由：关节每 2° 查一次，末端外 ~1m 一步最多 ~3.8cm；2cm + octomap 体素 3cm > 3.8cm，采样之间穿不过体素。
-- `attach_board.py --remove` 在同一个 diff 里先从手上取下（MoveIt 会把它放回 world）再从 world 删。
+## 纸板的几何假设
+
+默认纸板沿末端 x、y、z 轴分别长 0.59 m、宽 0.405 m、厚 0.02 m。吸盘沿末端 z 轴伸出 0.128 m，纸板近面贴在吸盘端面，纸板中心沿末端正 x 方向偏 0.10 m。这个偏移描述吸附点在纸板上的位置。碰撞体用了加厚的几何外形，以减小离散采样漏检薄物体的机会。[纸板尺寸、姿态与接触链接](attach_board.py)
+
+## 规划器怎样看见它们
+
+虚拟料框没有相机深度回波。为让规划器尽早剔除穿框路线，`obstacles_root` 把 `base_link` 下世界碰撞体的表面按约 2.5 cm 间距采点，与 OctoMap 占据点合并后换到手臂根系。末端线段粗筛据此可在求 IK 前拒绝候选。[表面采点与坐标变换](../arm_motion.py) · [线段粗筛](../planners/_edges.py)
+
+纸板的边角可能伸出末端点 10 cm 的粗筛半径。检查整机时，`ArmMotion.valid` 把候选关节角作为差量状态提交，`is_diff=True` 使 MoveIt 当前场景中的附着物参加碰撞判定。判断这类路径要看带附着物的整机检查结果。[附着物查询与保留](../arm_motion.py)

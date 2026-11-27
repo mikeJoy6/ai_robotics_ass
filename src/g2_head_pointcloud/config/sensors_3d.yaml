@@ -48,7 +48,7 @@ head_shadow:
   filtered_cloud_topic: /head_camera/shadow_filtered_points
 
 # 清零星格（genie_robot_agibot_g2_perception/octomap_sweeper）：只有超出 max_range 的远点 → 只沿射线清空、不记占据。
-#   octomap 里小于 4 格的连通块，沿"相机→该格"射线清掉；射线路上有大块占据格的不发。
+#   octomap 里的小块(<4 格)和悬空块(<40 格且不落地,见 head_camera.yaml octomap_sweeper),沿"相机→该格"射线清掉；射线路上有大块占据格的不发。
 head_sweep:
   sensor_plugin: occupancy_map_monitor/PointCloudOctomapUpdater
   point_cloud_topic: /head_camera/sweep_points
@@ -56,5 +56,5 @@ head_sweep:
   point_subsample: 1
   padding_offset: 0.10
   padding_scale: 1.0
-  max_update_rate: 5.0
+  max_update_rate: 10.0         # = octomap_sweeper.burst_rate（2026-11-13 从 5 提到 10：一个格 ~9 次清空，1s 内清掉）
   filtered_cloud_topic: /head_camera/sweep_filtered_points   # 必填（见 head_shadow）
